@@ -2,8 +2,6 @@
 
 macOS 메뉴바에서 Claude Code 사용량(5시간 / 7일 한도)을 실시간으로 모니터링하는 앱입니다.
 
-![ClaudeMeter screenshot](screenshot.png)
-
 ---
 
 ## Requirements
