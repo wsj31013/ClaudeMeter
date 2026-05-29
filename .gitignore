@@ -1,0 +1,32 @@
+# Claude Code local settings (machine-specific paths)
+.claude/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Swift build artifacts
+ClaudeMeter/.build/
+.build/
+*.o
+*.d
+
+# Compiled app bundle and release archives (upload to GitHub Releases, not git)
+ClaudeMeter/ClaudeMeter.app/
+ClaudeMeter/*.zip
+
+# Xcode project (SPM 기반이므로 Package.swift로 대체 — Xcode에서 Package.swift를 직접 열것)
+*.xcodeproj/
+
+# Xcode user-specific data
+xcuserdata/
+*.xcuserstate
+*.xcworkspace/xcuserdata/
+*.xcworkspace/xcshareddata/IDEWorkspaceChecks.plist
+
+# Screenshots — screenshot.png(README용)만 허용, 나머지 이미지 제외
+*.png
+
+# SPM resolved versions (optional: commit if you want reproducible builds)
+# ClaudeMeter/Package.resolved
