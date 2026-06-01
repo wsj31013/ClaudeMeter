@@ -16,6 +16,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             name: .usageDataDidUpdate,
             object: nil
         )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(onSystemWake),
+            name: NSWorkspace.didWakeNotification,
+            object: nil
+        )
+    }
+
+    @objc private func onSystemWake() {
+        Task { await UsageService.shared.fetchUsage() }
     }
 
     @MainActor

@@ -28,7 +28,9 @@ final class UsageService: ObservableObject {
     @Published var lastUpdated: Date?
 
     private var refreshTimer: Timer?
+    private var retryTimer: Timer?
     private let refreshInterval: TimeInterval = 300 // 5분
+    private let retryInterval: TimeInterval = 60   // 에러 후 1분 재시도
 
     private static let endpoint = URL(string: "https://api.anthropic.com/api/oauth/usage")!
     private static let tokenEndpoint = URL(string: "https://api.anthropic.com/api/oauth/token")!
@@ -52,6 +54,8 @@ final class UsageService: ObservableObject {
     func stopAutoRefresh() {
         refreshTimer?.invalidate()
         refreshTimer = nil
+        retryTimer?.invalidate()
+        retryTimer = nil
     }
 
     func fetchUsage() async {
@@ -61,34 +65,52 @@ final class UsageService: ObservableObject {
         do {
             let token = try await resolveValidToken()
             try await performFetch(token: token)
+            retryTimer?.invalidate()
+            retryTimer = nil
         } catch UsageError.unauthorized {
-            // Token rejected — try refresh once and retry
+            // resolveValidToken에서 갱신 실패하거나 API가 401을 반환한 경우 — 한 번 더 시도
+            // refreshOAuthToken()은 내부적으로 Keychain을 다시 읽으므로
+            // Claude Code가 이미 갱신해둔 refreshToken도 활용됨
             do {
                 let newToken = try await refreshOAuthToken()
                 try await performFetch(token: newToken)
+                retryTimer?.invalidate()
+                retryTimer = nil
             } catch let e as UsageError {
                 error = e
+                scheduleRetry()
             } catch {
-                self.error = .unauthorized
+                self.error = .networkError(error)
+                scheduleRetry()
             }
         } catch let e as KeychainError {
             error = e == .notFound ? .noToken : .unauthorized
+            if e != .notFound { scheduleRetry() }
         } catch let e as UsageError {
             error = e
+            scheduleRetry()
         } catch {
             self.error = .networkError(error)
+            scheduleRetry()
         }
     }
 
-    // Proactively refreshes if token expires within 60 seconds
+    private func scheduleRetry() {
+        retryTimer?.invalidate()
+        retryTimer = Timer.scheduledTimer(withTimeInterval: retryInterval, repeats: false) { [weak self] _ in
+            Task { await self?.fetchUsage() }
+        }
+    }
+
+    // 토큰이 만료됐거나 60초 이내 만료 예정이면 먼저 갱신 시도
     private func resolveValidToken() async throws -> String {
         let tokenData = try KeychainService.shared.oAuthTokenData()
 
-        if let expiresAt = tokenData.expiresAt, expiresAt.timeIntervalSinceNow < 60,
-           tokenData.refreshToken != nil {
-            if let refreshed = try? await refreshOAuthToken() {
-                return refreshed
-            }
+        let isExpiredOrExpiring = tokenData.expiresAt.map { $0.timeIntervalSinceNow < 60 } ?? false
+
+        if isExpiredOrExpiring, tokenData.refreshToken != nil {
+            // 갱신 성공 시 새 토큰, 실패 시 만료 토큰 대신 에러를 throw해서 401 핸들러로 위임
+            return try await refreshOAuthToken()
         }
 
         return tokenData.accessToken
