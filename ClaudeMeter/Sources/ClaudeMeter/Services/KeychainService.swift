@@ -20,6 +20,87 @@ final class KeychainService {
 
     private static let service = "Claude Code-credentials"
 
+    // MARK: - 자체 소유 토큰 저장소 (com.claudemeter.tokens)
+    // Claude Code Keychain 크로스앱 접근을 최초 1회로 줄이기 위해 사용
+
+    private static let ownService = "com.claudemeter.tokens"
+    private static let ownAccount = "oauth"
+
+    func saveOwnTokens(accessToken: String, refreshToken: String?, expiresAt: Date?) throws {
+        var json: [String: Any] = ["accessToken": accessToken]
+        if let refreshToken { json["refreshToken"] = refreshToken }
+        if let expiresAt {
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            json["expiresAt"] = formatter.string(from: expiresAt)
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: json) else {
+            throw KeychainError.invalidData
+        }
+
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: Self.ownService,
+            kSecAttrAccount: Self.ownAccount
+        ]
+        let attributes: [CFString: Any] = [kSecValueData: data]
+
+        let updateStatus = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+        if updateStatus == errSecSuccess { return }
+
+        guard updateStatus == errSecItemNotFound else {
+            throw KeychainError.unexpectedStatus(updateStatus)
+        }
+
+        var addQuery = query
+        addQuery[kSecValueData] = data
+        addQuery[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlock
+        let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
+        guard addStatus == errSecSuccess else {
+            throw KeychainError.unexpectedStatus(addStatus)
+        }
+    }
+
+    func loadOwnTokens() throws -> OAuthTokenData {
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: Self.ownService,
+            kSecAttrAccount: Self.ownAccount,
+            kSecReturnData: true,
+            kSecMatchLimit: kSecMatchLimitOne
+        ]
+
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+
+        guard status == errSecSuccess else {
+            if status == errSecItemNotFound { throw KeychainError.notFound }
+            throw KeychainError.unexpectedStatus(status)
+        }
+
+        guard let data = result as? Data,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let accessToken = json["accessToken"] as? String
+        else {
+            throw KeychainError.invalidData
+        }
+
+        return OAuthTokenData(
+            accessToken: accessToken,
+            refreshToken: json["refreshToken"] as? String,
+            expiresAt: parseDate(json["expiresAt"] as? String)
+        )
+    }
+
+    func deleteOwnTokens() {
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: Self.ownService,
+            kSecAttrAccount: Self.ownAccount
+        ]
+        SecItemDelete(query as CFDictionary)
+    }
+
     func claudeOAuthToken() throws -> String {
         try oAuthTokenData().accessToken
     }

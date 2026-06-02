@@ -102,18 +102,32 @@ final class UsageService: ObservableObject {
         }
     }
 
-    // 토큰이 만료됐거나 60초 이내 만료 예정이면 먼저 갱신 시도
+    // 자체 Keychain 우선 읽기 → 없으면 Claude Code Keychain fallback (최초 1회 팝업)
     private func resolveValidToken() async throws -> String {
-        let tokenData = try KeychainService.shared.oAuthTokenData()
+        let tokenData = try loadTokenData()
 
         let isExpiredOrExpiring = tokenData.expiresAt.map { $0.timeIntervalSinceNow < 60 } ?? false
 
         if isExpiredOrExpiring, tokenData.refreshToken != nil {
-            // 갱신 성공 시 새 토큰, 실패 시 만료 토큰 대신 에러를 throw해서 401 핸들러로 위임
             return try await refreshOAuthToken()
         }
 
         return tokenData.accessToken
+    }
+
+    private func loadTokenData() throws -> OAuthTokenData {
+        // 자체 Keychain에서 먼저 읽기 (팝업 없음)
+        if let own = try? KeychainService.shared.loadOwnTokens() {
+            return own
+        }
+        // 없으면 Claude Code Keychain에서 부트스트랩 (최초 1회 팝업 발생 가능)
+        let bootstrapped = try KeychainService.shared.oAuthTokenData()
+        try? KeychainService.shared.saveOwnTokens(
+            accessToken: bootstrapped.accessToken,
+            refreshToken: bootstrapped.refreshToken,
+            expiresAt: bootstrapped.expiresAt
+        )
+        return bootstrapped
     }
 
     private func performFetch(token: String) async throws {
@@ -140,7 +154,13 @@ final class UsageService: ObservableObject {
     }
 
     private func refreshOAuthToken() async throws -> String {
-        let tokenData = try KeychainService.shared.oAuthTokenData()
+        // 자체 Keychain 우선, 없으면 Claude Code Keychain fallback
+        let tokenData: OAuthTokenData
+        if let own = try? KeychainService.shared.loadOwnTokens() {
+            tokenData = own
+        } else {
+            tokenData = try KeychainService.shared.oAuthTokenData()
+        }
         guard let refreshToken = tokenData.refreshToken else {
             throw UsageError.unauthorized
         }
@@ -173,7 +193,7 @@ final class UsageService: ObservableObject {
         let refreshed = try JSONDecoder().decode(RefreshResponse.self, from: data)
         let expiresAt = refreshed.expiresIn.map { Date().addingTimeInterval(TimeInterval($0)) }
 
-        try KeychainService.shared.updateOAuthTokens(
+        try KeychainService.shared.saveOwnTokens(
             accessToken: refreshed.accessToken,
             refreshToken: refreshed.refreshToken,
             expiresAt: expiresAt

@@ -42,7 +42,15 @@ cp "Sources/ClaudeMeter/Info.plist" "$CONTENTS/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$CONTENTS/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" "$CONTENTS/Info.plist"
 
-codesign --force --deep --sign - "$APP_DIR"
+if security find-identity -v -p codesigning 2>/dev/null | grep -q "ClaudeMeter Dev"; then
+    codesign --force --deep --sign "ClaudeMeter Dev" "$APP_DIR"
+    echo "  Signed with ClaudeMeter Dev certificate"
+else
+    codesign --force --deep --sign - "$APP_DIR"
+    echo "  ⚠️  Ad-hoc signed (키체인 팝업 반복 발생 가능)"
+    echo "  → 영구 해결: Keychain Access > Certificate Assistant > Create a Certificate"
+    echo "    Name: 'ClaudeMeter Dev', Type: Code Signing, Identity: Self Signed Root"
+fi
 
 # Create distributable zip
 ZIP_NAME="ClaudeMeter-${VERSION}-${ARCH_LABEL}.zip"
