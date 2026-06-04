@@ -20,71 +20,48 @@ final class KeychainService {
 
     private static let service = "Claude Code-credentials"
 
-    // MARK: - 자체 소유 토큰 저장소 (com.claudemeter.tokens)
-    // Claude Code Keychain 크로스앱 접근을 최초 1회로 줄이기 위해 사용
+    // MARK: - 자체 토큰 파일 저장소
+    // Keychain은 ad-hoc 재서명 시 코드 해시가 바뀌면 이전 빌드가 저장한 아이템에
+    // 접근이 거부(errSecAuthFailed)되어 결국 Claude Code Keychain fallback이 반복된다.
+    // 파일 저장은 코드 서명과 무관하게 영구 유지되므로 이 문제가 발생하지 않는다.
 
-    private static let ownService = "com.claudemeter.tokens"
-    private static let ownAccount = "oauth"
+    private var tokenFileURL: URL? {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            .first?.appendingPathComponent("ClaudeMeter/tokens.json")
+    }
 
     func saveOwnTokens(accessToken: String, refreshToken: String?, expiresAt: Date?) throws {
+        guard let url = tokenFileURL else { throw KeychainError.invalidData }
         var json: [String: Any] = ["accessToken": accessToken]
         if let refreshToken { json["refreshToken"] = refreshToken }
         if let expiresAt {
-            let formatter = ISO8601DateFormatter()
-            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-            json["expiresAt"] = formatter.string(from: expiresAt)
+            let f = ISO8601DateFormatter()
+            f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            json["expiresAt"] = f.string(from: expiresAt)
         }
         guard let data = try? JSONSerialization.data(withJSONObject: json) else {
             throw KeychainError.invalidData
         }
-
-        let query: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: Self.ownService,
-            kSecAttrAccount: Self.ownAccount
-        ]
-        let attributes: [CFString: Any] = [kSecValueData: data]
-
-        let updateStatus = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
-        if updateStatus == errSecSuccess { return }
-
-        guard updateStatus == errSecItemNotFound else {
-            throw KeychainError.unexpectedStatus(updateStatus)
-        }
-
-        var addQuery = query
-        addQuery[kSecValueData] = data
-        addQuery[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlock
-        let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
-        guard addStatus == errSecSuccess else {
-            throw KeychainError.unexpectedStatus(addStatus)
-        }
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try data.write(to: url, options: .atomic)
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: NSNumber(value: 0o600)],
+            ofItemAtPath: url.path
+        )
     }
 
     func loadOwnTokens() throws -> OAuthTokenData {
-        let query: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: Self.ownService,
-            kSecAttrAccount: Self.ownAccount,
-            kSecReturnData: true,
-            kSecMatchLimit: kSecMatchLimitOne
-        ]
-
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-
-        guard status == errSecSuccess else {
-            if status == errSecItemNotFound { throw KeychainError.notFound }
-            throw KeychainError.unexpectedStatus(status)
+        guard let url = tokenFileURL else { throw KeychainError.invalidData }
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw KeychainError.notFound
         }
-
-        guard let data = result as? Data,
+        guard let data = try? Data(contentsOf: url),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let accessToken = json["accessToken"] as? String
-        else {
-            throw KeychainError.invalidData
-        }
-
+        else { throw KeychainError.invalidData }
         return OAuthTokenData(
             accessToken: accessToken,
             refreshToken: json["refreshToken"] as? String,
@@ -93,12 +70,8 @@ final class KeychainService {
     }
 
     func deleteOwnTokens() {
-        let query: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: Self.ownService,
-            kSecAttrAccount: Self.ownAccount
-        ]
-        SecItemDelete(query as CFDictionary)
+        guard let url = tokenFileURL else { return }
+        try? FileManager.default.removeItem(at: url)
     }
 
     func claudeOAuthToken() throws -> String {

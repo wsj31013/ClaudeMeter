@@ -68,14 +68,18 @@ final class UsageService: ObservableObject {
             retryTimer?.invalidate()
             retryTimer = nil
         } catch UsageError.unauthorized {
-            // resolveValidToken에서 갱신 실패하거나 API가 401을 반환한 경우 — 한 번 더 시도
-            // refreshOAuthToken()은 내부적으로 Keychain을 다시 읽으므로
-            // Claude Code가 이미 갱신해둔 refreshToken도 활용됨
+            // access_token 만료 — refresh_token으로 재시도
             do {
                 let newToken = try await refreshOAuthToken()
                 try await performFetch(token: newToken)
                 retryTimer?.invalidate()
                 retryTimer = nil
+            } catch UsageError.unauthorized {
+                // refresh_token도 만료됨 — 저장된 파일 삭제 후 재시도
+                // 다음 fetchUsage()에서 Claude Code Keychain 재부트스트랩 (팝업 1회)
+                KeychainService.shared.deleteOwnTokens()
+                error = .unauthorized
+                scheduleRetry()
             } catch let e as UsageError {
                 error = e
                 scheduleRetry()
