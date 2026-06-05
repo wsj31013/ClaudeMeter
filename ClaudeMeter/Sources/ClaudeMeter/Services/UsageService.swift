@@ -29,8 +29,10 @@ final class UsageService: ObservableObject {
 
     private var refreshTimer: Timer?
     private var retryTimer: Timer?
-    private let refreshInterval: TimeInterval = 300 // 5분
-    private let retryInterval: TimeInterval = 60   // 에러 후 1분 재시도
+    private var retryCount = 0
+    private let refreshInterval: TimeInterval = 300    // 5분 정상 폴링
+    private let baseRetryInterval: TimeInterval = 60   // 에러 후 첫 재시도
+    private let maxRetryInterval: TimeInterval = 600   // 지수 백오프 상한 (10분)
 
     private static let endpoint = URL(string: "https://api.anthropic.com/api/oauth/usage")!
     private static let tokenEndpoint = URL(string: "https://api.anthropic.com/api/oauth/token")!
@@ -46,8 +48,12 @@ final class UsageService: ObservableObject {
 
     func startAutoRefresh() {
         Task { await fetchUsage() }
+        // retryTimer가 살아 있는 동안 refreshTimer는 중복 호출하지 않음
         refreshTimer = Timer.scheduledTimer(withTimeInterval: refreshInterval, repeats: true) { [weak self] _ in
-            Task { await self?.fetchUsage() }
+            Task { @MainActor [weak self] in
+                guard let self, self.retryTimer == nil else { return }
+                await self.fetchUsage()
+            }
         }
     }
 
@@ -59,27 +65,29 @@ final class UsageService: ObservableObject {
     }
 
     func fetchUsage() async {
+        guard !isLoading else { return }
         isLoading = true
         defer { isLoading = false }
 
         do {
             let token = try await resolveValidToken()
             try await performFetch(token: token)
-            retryTimer?.invalidate()
-            retryTimer = nil
+            clearRetry()
         } catch UsageError.unauthorized {
-            // access_token 만료 — refresh_token으로 재시도
+            // access_token 만료 — refresh_token으로 한 번 재시도
             do {
                 let newToken = try await refreshOAuthToken()
                 try await performFetch(token: newToken)
-                retryTimer?.invalidate()
-                retryTimer = nil
+                clearRetry()
             } catch UsageError.unauthorized {
-                // refresh_token도 만료됨 — 저장된 파일 삭제 후 재시도
-                // 다음 fetchUsage()에서 Claude Code Keychain 재부트스트랩 (팝업 1회)
+                // refresh_token도 만료됨 — 파일 삭제 후 다음 실행에서 재부트스트랩
                 KeychainService.shared.deleteOwnTokens()
                 error = .unauthorized
                 scheduleRetry()
+            } catch UsageError.rateLimited {
+                // 토큰 갱신 엔드포인트도 rate limit — 토큰은 삭제하지 않고 대기
+                error = .rateLimited
+                // 429는 공격적 재시도 금지: refreshTimer(5분)가 자연스럽게 처리
             } catch let e as UsageError {
                 error = e
                 scheduleRetry()
@@ -87,6 +95,10 @@ final class UsageService: ObservableObject {
                 self.error = .networkError(error)
                 scheduleRetry()
             }
+        } catch UsageError.rateLimited {
+            error = .rateLimited
+            // 429는 공격적 재시도 금지: refreshTimer(5분)가 자연스럽게 처리
+            // 재시도를 거듭해 rate limit을 악화시키지 않음
         } catch let e as KeychainError {
             error = e == .notFound ? .noToken : .unauthorized
             if e != .notFound { scheduleRetry() }
@@ -99,14 +111,23 @@ final class UsageService: ObservableObject {
         }
     }
 
+    private func clearRetry() {
+        retryTimer?.invalidate()
+        retryTimer = nil
+        retryCount = 0
+    }
+
+    // 지수 백오프: 60s → 120s → 240s → 최대 600s(10분)
     private func scheduleRetry() {
         retryTimer?.invalidate()
-        retryTimer = Timer.scheduledTimer(withTimeInterval: retryInterval, repeats: false) { [weak self] _ in
+        let delay = min(baseRetryInterval * pow(2.0, Double(retryCount)), maxRetryInterval)
+        retryCount += 1
+        retryTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
             Task { await self?.fetchUsage() }
         }
     }
 
-    // 자체 Keychain 우선 읽기 → 없으면 Claude Code Keychain fallback (최초 1회 팝업)
+    // 자체 파일 우선 읽기 → 없으면 Claude Code Keychain fallback (최초 1회 팝업)
     private func resolveValidToken() async throws -> String {
         let tokenData = try loadTokenData()
 
@@ -120,11 +141,9 @@ final class UsageService: ObservableObject {
     }
 
     private func loadTokenData() throws -> OAuthTokenData {
-        // 자체 Keychain에서 먼저 읽기 (팝업 없음)
         if let own = try? KeychainService.shared.loadOwnTokens() {
             return own
         }
-        // 없으면 Claude Code Keychain에서 부트스트랩 (최초 1회 팝업 발생 가능)
         let bootstrapped = try KeychainService.shared.oAuthTokenData()
         try? KeychainService.shared.saveOwnTokens(
             accessToken: bootstrapped.accessToken,
@@ -158,7 +177,6 @@ final class UsageService: ObservableObject {
     }
 
     private func refreshOAuthToken() async throws -> String {
-        // 자체 Keychain 우선, 없으면 Claude Code Keychain fallback
         let tokenData: OAuthTokenData
         if let own = try? KeychainService.shared.loadOwnTokens() {
             tokenData = own
@@ -179,8 +197,11 @@ final class UsageService: ObservableObject {
 
         let (data, response) = try await URLSession.shared.data(for: request)
 
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            throw UsageError.unauthorized
+        guard let http = response as? HTTPURLResponse else { throw UsageError.parseError }
+        switch http.statusCode {
+        case 200: break
+        case 429: throw UsageError.rateLimited  // 갱신 엔드포인트 rate limit — 토큰 삭제 금지
+        default: throw UsageError.unauthorized   // refresh_token 만료 등
         }
 
         struct RefreshResponse: Decodable {
