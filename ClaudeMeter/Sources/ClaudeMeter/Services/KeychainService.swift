@@ -103,7 +103,8 @@ final class KeychainService {
         }
 
         let refreshToken = oauthData["refreshToken"] as? String
-        let expiresAt = parseDate(oauthData["expiresAt"] as? String)
+        // expiresAt은 ISO8601 문자열 또는 Unix 밀리초 숫자 두 가지 형식으로 저장될 수 있음
+        let expiresAt = parseExpiresAt(oauthData["expiresAt"])
 
         return OAuthTokenData(accessToken: accessToken, refreshToken: refreshToken, expiresAt: expiresAt)
     }
@@ -160,5 +161,17 @@ final class KeychainService {
         withFrac.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         if let date = withFrac.date(from: string) { return date }
         return ISO8601DateFormatter().date(from: string)
+    }
+
+    // Claude Code가 Unix 밀리초 숫자로 저장하는 경우도 처리
+    private func parseExpiresAt(_ value: Any?) -> Date? {
+        guard let value else { return nil }
+        if let str = value as? String { return parseDate(str) }
+        let ms: Double
+        if let n = value as? Double { ms = n }
+        else if let n = value as? Int { ms = Double(n) }
+        else if let n = value as? Int64 { ms = Double(n) }
+        else { return nil }
+        return Date(timeIntervalSince1970: ms / 1000)
     }
 }

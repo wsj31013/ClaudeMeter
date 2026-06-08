@@ -3,6 +3,7 @@ import Foundation
 enum UsageError: LocalizedError {
     case noToken
     case unauthorized
+    case keychainAccessRequired
     case rateLimited
     case networkError(Error)
     case parseError
@@ -11,6 +12,7 @@ enum UsageError: LocalizedError {
         switch self {
         case .noToken: return "Claude Code 로그인이 필요합니다"
         case .unauthorized: return "인증 토큰이 만료되었습니다"
+        case .keychainAccessRequired: return "키체인 접근 허용이 필요합니다 — 팝업을 확인해주세요"
         case .rateLimited: return "요청 한도 초과 — 잠시 후 재시도"
         case .networkError(let e): return "네트워크 오류: \(e.localizedDescription)"
         case .parseError: return "응답 파싱 실패"
@@ -100,8 +102,13 @@ final class UsageService: ObservableObject {
             // 429는 공격적 재시도 금지: refreshTimer(5분)가 자연스럽게 처리
             // 재시도를 거듭해 rate limit을 악화시키지 않음
         } catch let e as KeychainError {
-            error = e == .notFound ? .noToken : .unauthorized
-            if e != .notFound { scheduleRetry() }
+            switch e {
+            case .notFound:
+                error = .noToken
+            default:
+                error = .keychainAccessRequired
+                scheduleRetry()
+            }
         } catch let e as UsageError {
             error = e
             scheduleRetry()
@@ -141,9 +148,10 @@ final class UsageService: ObservableObject {
     }
 
     private func loadTokenData() throws -> OAuthTokenData {
-        if let own = try? KeychainService.shared.loadOwnTokens() {
+        if let own = try? KeychainService.shared.loadOwnTokens(), own.refreshToken != nil {
             return own
         }
+        // No file, or file has no refreshToken → re-bootstrap from Claude Code Keychain
         let bootstrapped = try KeychainService.shared.oAuthTokenData()
         try? KeychainService.shared.saveOwnTokens(
             accessToken: bootstrapped.accessToken,
@@ -218,9 +226,12 @@ final class UsageService: ObservableObject {
         let refreshed = try JSONDecoder().decode(RefreshResponse.self, from: data)
         let expiresAt = refreshed.expiresIn.map { Date().addingTimeInterval(TimeInterval($0)) }
 
+        // OAuth2 서버가 refresh_token을 응답에 포함하지 않으면 기존 토큰을 그대로 보존
+        let savedRefreshToken = refreshed.refreshToken ?? tokenData.refreshToken
+
         try KeychainService.shared.saveOwnTokens(
             accessToken: refreshed.accessToken,
-            refreshToken: refreshed.refreshToken,
+            refreshToken: savedRefreshToken,
             expiresAt: expiresAt
         )
 
