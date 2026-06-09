@@ -3,6 +3,7 @@ import Foundation
 enum UsageError: LocalizedError {
     case noToken
     case unauthorized
+    case refreshTokenExpired
     case keychainAccessRequired
     case rateLimited
     case networkError(Error)
@@ -12,6 +13,7 @@ enum UsageError: LocalizedError {
         switch self {
         case .noToken: return "Claude Code 로그인이 필요합니다"
         case .unauthorized: return "인증 토큰이 만료되었습니다"
+        case .refreshTokenExpired: return "인증 토큰이 만료되었습니다"
         case .keychainAccessRequired: return "키체인 접근 허용이 필요합니다 — 팝업을 확인해주세요"
         case .rateLimited: return "요청 한도 초과 — 잠시 후 재시도"
         case .networkError(let e): return "네트워크 오류: \(e.localizedDescription)"
@@ -75,22 +77,27 @@ final class UsageService: ObservableObject {
             let token = try await resolveValidToken()
             try await performFetch(token: token)
             clearRetry()
+        } catch UsageError.refreshTokenExpired {
+            // resolveValidToken()에서 refresh 시도했으나 refresh_token 확정 만료
+            KeychainService.shared.deleteOwnTokens()
+            error = .unauthorized
+            scheduleRetry()
         } catch UsageError.unauthorized {
-            // access_token 만료 — refresh_token으로 한 번 재시도
+            // performFetch()에서 401 — access_token 만료, refresh 시도
             do {
                 let newToken = try await refreshOAuthToken()
                 try await performFetch(token: newToken)
                 clearRetry()
-            } catch UsageError.unauthorized {
-                // refresh_token도 만료됨 — 파일 삭제 후 다음 실행에서 재부트스트랩
+            } catch UsageError.refreshTokenExpired {
+                // refresh_token도 만료됨 (400/401) — 파일 삭제 후 다음 실행에서 재부트스트랩
                 KeychainService.shared.deleteOwnTokens()
                 error = .unauthorized
                 scheduleRetry()
             } catch UsageError.rateLimited {
-                // 토큰 갱신 엔드포인트도 rate limit — 토큰은 삭제하지 않고 대기
+                // 갱신 엔드포인트 rate limit — 토큰 파일 유지, 재시도 없음
                 error = .rateLimited
-                // 429는 공격적 재시도 금지: refreshTimer(5분)가 자연스럽게 처리
             } catch let e as UsageError {
+                // 서버 오류 등 일시적 실패 — 파일은 유지하고 재시도
                 error = e
                 scheduleRetry()
             } catch {
@@ -99,8 +106,6 @@ final class UsageService: ObservableObject {
             }
         } catch UsageError.rateLimited {
             error = .rateLimited
-            // 429는 공격적 재시도 금지: refreshTimer(5분)가 자연스럽게 처리
-            // 재시도를 거듭해 rate limit을 악화시키지 않음
         } catch let e as KeychainError {
             switch e {
             case .notFound:
@@ -208,8 +213,9 @@ final class UsageService: ObservableObject {
         guard let http = response as? HTTPURLResponse else { throw UsageError.parseError }
         switch http.statusCode {
         case 200: break
-        case 429: throw UsageError.rateLimited  // 갱신 엔드포인트 rate limit — 토큰 삭제 금지
-        default: throw UsageError.unauthorized   // refresh_token 만료 등
+        case 429: throw UsageError.rateLimited      // rate limit — 토큰 파일 유지
+        case 400, 401: throw UsageError.refreshTokenExpired  // refresh_token 만료 확정 → 파일 삭제
+        default: throw UsageError.networkError(URLError(.badServerResponse))  // 서버 오류 — 파일 유지
         }
 
         struct RefreshResponse: Decodable {
