@@ -211,6 +211,10 @@ final class UsageService: ObservableObject {
         let (data, response) = try await URLSession.shared.data(for: request)
 
         guard let http = response as? HTTPURLResponse else { throw UsageError.parseError }
+        if http.statusCode != 200 {
+            let body = String(data: data, encoding: .utf8) ?? "(no body)"
+            NSLog("[ClaudeMeter] refresh failed: HTTP %d — %@", http.statusCode, body)
+        }
         switch http.statusCode {
         case 200: break
         case 429: throw UsageError.rateLimited      // rate limit — 토큰 파일 유지
