@@ -39,7 +39,8 @@ final class UsageService: ObservableObject {
     private let maxRetryInterval: TimeInterval = 600   // 지수 백오프 상한 (10분)
 
     private static let endpoint = URL(string: "https://api.anthropic.com/api/oauth/usage")!
-    private static let tokenEndpoint = URL(string: "https://api.anthropic.com/api/oauth/token")!
+    private static let tokenEndpoint = URL(string: "https://platform.claude.com/v1/oauth/token")!
+    private static let oauthClientId = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
     private static let isoFormatters: [ISO8601DateFormatter] = {
         let withFrac = ISO8601DateFormatter()
         withFrac.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -205,7 +206,11 @@ final class UsageService: ObservableObject {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
 
-        let body = ["grant_type": "refresh_token", "refresh_token": refreshToken]
+        let body = [
+            "grant_type": "refresh_token",
+            "refresh_token": refreshToken,
+            "client_id": Self.oauthClientId
+        ]
         request.httpBody = try JSONEncoder().encode(body)
 
         let (data, response) = try await URLSession.shared.data(for: request)
